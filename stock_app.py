@@ -1,197 +1,244 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 
 # === 页面配置 ===
-st.set_page_config(page_title="我的高股息投资看板", layout="wide", page_icon="📈")
+st.set_page_config(page_title="全球资产看板", layout="wide", page_icon="🌏")
 
-# === 1. 初始化数据 (Session State) ===
-# 如果是第一次运行，加载默认股票池
+# === 1. 初始化 Session State (数据存储) ===
 if 'portfolio' not in st.session_state:
-    # 默认股票列表 (代码后缀: SS=上海, SZ=深圳, HK=港股)
-    default_data = [
-        {"code": "601919.SS", "name": "中远海控", "cost": 10.0, "qty": 1000, "expected_div": 1.5, "buy_yield": 12.0, "sell_yield": 5.0},
-        {"code": "603565.SS", "name": "中谷物流", "cost": 9.0,  "qty": 0,    "expected_div": 0.8, "buy_yield": 8.0,  "sell_yield": 3.0},
-        {"code": "601668.SS", "name": "中国建筑", "cost": 5.5,  "qty": 2000, "expected_div": 0.3, "buy_yield": 6.0,  "sell_yield": 3.0},
-        {"code": "600900.SS", "name": "长江电力", "cost": 22.0, "qty": 500,  "expected_div": 0.9, "buy_yield": 4.0,  "sell_yield": 2.0},
-        {"code": "601088.SS", "name": "中国神华", "cost": 30.0, "qty": 0,    "expected_div": 2.5, "buy_yield": 9.0,  "sell_yield": 4.0},
-        {"code": "600938.SS", "name": "中国海油", "cost": 18.0, "qty": 0,    "expected_div": 1.8, "buy_yield": 10.0, "sell_yield": 5.0},
-        {"code": "000651.SZ", "name": "格力电器", "cost": 35.0, "qty": 100,  "expected_div": 2.8, "buy_yield": 7.0,  "sell_yield": 3.0},
-        {"code": "600941.SS", "name": "中国移动", "cost": 90.0, "qty": 200,  "expected_div": 4.5, "buy_yield": 6.0,  "sell_yield": 3.0},
-    ]
-    st.session_state.portfolio = pd.DataFrame(default_data)
-
-# === 2. 侧边栏：添加/管理股票 ===
-st.sidebar.header("🛠️ 管理工具")
-st.sidebar.write("在下方添加新股票或刷新数据")
-
-with st.sidebar.form("add_stock_form"):
-    new_code = st.text_input("股票代码 (如 600519.SS)", "")
-    new_name = st.text_input("股票名称", "")
-    submitted = st.form_submit_button("添加股票")
-    if submitted and new_code and new_name:
-        new_row = {"code": new_code, "name": new_name, "cost": 0.0, "qty": 0, "expected_div": 0.0, "buy_yield": 5.0, "sell_yield": 2.0}
-        st.session_state.portfolio = pd.concat([st.session_state.portfolio, pd.DataFrame([new_row])], ignore_index=True)
-        st.success(f"已添加 {new_name}")
-
-if st.sidebar.button("🔄 强制刷新股价"):
-    st.rerun()
-
-# === 3. 核心逻辑：获取股价并计算 ===
-def get_market_data(df):
-    tickers = " ".join(df['code'].tolist())
-    if not tickers:
-        return df
+    # A股/港股 (高股息策略)
+    st.session_state.cn_stocks = pd.DataFrame([
+        {"code": "601919.SS", "name": "中远海控", "cost": 10.0, "qty": 1000, "exp_div": 1.5, "buy_yld": 12.0, "sell_yld": 5.0},
+        {"code": "600900.SS", "name": "长江电力", "cost": 22.0, "qty": 500, "exp_div": 0.9, "buy_yld": 4.0, "sell_yld": 2.0},
+        {"code": "0941.HK",    "name": "中国移动HK", "cost": 65.0, "qty": 500, "exp_div": 4.8, "buy_yld": 7.0, "sell_yld": 3.0},
+    ])
     
+    # 新加坡 REITs (高股息策略)
+    st.session_state.sg_reits = pd.DataFrame([
+        {"code": "C38U.SI", "name": "CapLand IntCom", "cost": 1.90, "qty": 2000, "exp_div": 0.10, "buy_yld": 6.0, "sell_yld": 4.0},
+        {"code": "M44U.SI", "name": "Mapletree Log",  "cost": 1.50, "qty": 3000, "exp_div": 0.08, "buy_yld": 6.5, "sell_yld": 4.5},
+    ])
+
+    # 美股/ETF (成长/定投策略)
+    st.session_state.us_stocks = pd.DataFrame([
+        {"code": "VOO",  "name": "标普500 ETF", "cost": 400.0, "qty": 10},
+        {"code": "NVDA", "name": "英伟达",       "cost": 450.0, "qty": 5},
+        {"code": "AAPL", "name": "苹果",         "cost": 170.0, "qty": 10},
+    ])
+
+# === 2. 侧边栏：资产录入与汇率 ===
+st.sidebar.header("💰 现金与固收 (手动)")
+
+# 汇率获取函数
+@st.cache_data(ttl=3600) # 缓存1小时
+def get_exchange_rates():
     try:
-        # 从 Yahoo Finance 批量获取数据
+        tickers = yf.Tickers("CNY=X SGDCNY=X")
+        usd_cny = tickers.tickers['CNY=X'].fast_info['last_price']
+        sgd_cny = tickers.tickers['SGDCNY=X'].fast_info['last_price']
+        return usd_cny, sgd_cny
+    except:
+        return 7.2, 5.3 # 默认保底汇率
+
+usd_rate, sgd_rate = get_exchange_rates()
+st.sidebar.caption(f"参考汇率: USD/CNY ≈ {usd_rate:.2f} | SGD/CNY ≈ {sgd_rate:.2f}")
+
+with st.sidebar.form("cash_bond_form"):
+    st.write("请更新当前余额 (原币种):")
+    cash_cny = st.number_input("🇨🇳 人民币现金 (CNY)", value=50000.0, step=1000.0)
+    cash_sgd = st.number_input("🇸🇬 新币现金 (SGD)", value=10000.0, step=100.0)
+    cash_usd = st.number_input("🇺🇸 美元现金 (USD)", value=5000.0, step=100.0)
+    bond_usd_val = st.number_input("🇺🇸 美债直持现值 (USD)", value=20000.0, help="直接持有美债的当前总市值")
+    st.form_submit_button("更新资产状态")
+
+# === 3. 核心逻辑：获取行情 ===
+def get_realtime_data(df, currency_rate=1.0, mode='yield'):
+    if df.empty: return df
+    
+    tickers = " ".join(df['code'].tolist())
+    try:
         data = yf.Tickers(tickers)
         
-        # 创建临时列表存储计算结果
         current_prices = []
-        
+        day_changes = []
+        day_changes_pct = []
+
         for code in df['code']:
             try:
-                # 获取最新收盘价 (fast_info 比 history 更快)
-                price = data.tickers[code].fast_info['last_price']
+                info = data.tickers[code].fast_info
+                price = info['last_price']
+                prev_close = info['previous_close']
+                
                 current_prices.append(price)
+                change = price - prev_close
+                day_changes.append(change)
+                day_changes_pct.append((change / prev_close) * 100)
             except:
-                current_prices.append(0.0) # 获取失败
+                current_prices.append(0.0)
+                day_changes.append(0.0)
+                day_changes_pct.append(0.0)
+
+        df['price'] = current_prices
+        df['change_amt'] = day_changes
+        df['change_pct'] = day_changes_pct
         
-        df['current_price'] = current_prices
+        # 计算基础价值
+        df['mkt_val_local'] = df['price'] * df['qty']          # 原币市值
+        df['mkt_val_cny'] = df['mkt_val_local'] * currency_rate # 人民币市值
+        df['profit_cny'] = (df['price'] - df['cost']) * df['qty'] * currency_rate # 人民币盈亏
         
-        # 计算逻辑
-        # 1. 股息率 = 预期每股分红 / 当前股价
-        df['yield_now'] = df.apply(lambda x: (x['expected_div'] / x['current_price'] * 100) if x['current_price'] > 0 else 0, axis=1)
+        # 策略逻辑区分
+        if mode == 'yield':
+            df['yield_now'] = df.apply(lambda x: (x['exp_div'] / x['price'] * 100) if x['price'] > 0 else 0, axis=1)
+            def get_signal(row):
+                if row['price'] <= 0: return "❌"
+                if row['yield_now'] >= row['buy_yld']: return "🟢 买入"
+                elif row['yield_now'] <= row['sell_yld']: return "🔴 卖出"
+                else: return "⚪ 持有"
+            df['action'] = df.apply(get_signal, axis=1)
         
-        # 2. 持仓市值
-        df['market_value'] = df['current_price'] * df['qty']
-        
-        # 3. 浮动盈亏
-        df['profit'] = (df['current_price'] - df['cost']) * df['qty']
-        
-        # 4. 仓位比例 (计算总市值后处理)
-        total_asset = df['market_value'].sum()
-        df['weight'] = df.apply(lambda x: (x['market_value'] / total_asset * 100) if total_asset > 0 else 0, axis=1)
-        
-        # 5. 操作建议 (Signal)
-        def get_signal(row):
-            if row['current_price'] <= 0: return "数据错误"
-            if row['yield_now'] >= row['buy_yield']:
-                return "🟢 极低估 (买入)"
-            elif row['yield_now'] <= row['sell_yield']:
-                return "🔴 极高估 (卖出)"
-            else:
-                return "⚪ 持有/观望"
-        
-        df['action'] = df.apply(get_signal, axis=1)
-        
+        elif mode == 'growth':
+            df['total_return_pct'] = (df['price'] - df['cost']) / df['cost'] * 100
+            
         return df
-        
     except Exception as e:
-        st.error(f"获取数据失败: {e}")
+        st.error(f"数据获取失败: {e}")
         return df
 
-# === 4. 主界面展示 ===
-st.title("📊 个人高股息投资看板")
+# === 4. 主界面 ===
+
+st.title("🌏 个人全球资产概览")
+st.caption("本位币: CNY (人民币) | 自动折算")
+
+# 获取数据 (带Spinner)
+with st.spinner('正在连接全球交易所...'):
+    df_cn = get_realtime_data(st.session_state.cn_stocks, 1.0, mode='yield')
+    df_sg = get_realtime_data(st.session_state.sg_reits, sgd_rate, mode='yield')
+    df_us = get_realtime_data(st.session_state.us_stocks, usd_rate, mode='growth')
+
+# --- 总资产计算 ---
+total_stock_cny = df_cn['mkt_val_cny'].sum() + df_sg['mkt_val_cny'].sum() + df_us['mkt_val_cny'].sum()
+total_cash_cny = cash_cny + (cash_sgd * sgd_rate) + (cash_usd * usd_rate)
+total_bond_cny = bond_usd_val * usd_rate
+net_worth = total_stock_cny + total_cash_cny + total_bond_cny
+
+# 昨收估算 (用于计算当日总盈亏，简化算法)
+day_gain_cn = (df_cn['change_amt'] * df_cn['qty']).sum()
+day_gain_sg = (df_sg['change_amt'] * df_sg['qty'] * sgd_rate).sum()
+day_gain_us = (df_us['change_amt'] * df_us['qty'] * usd_rate).sum()
+total_day_gain = day_gain_cn + day_gain_sg + day_gain_us
+
+# 累计总盈亏
+total_profit = df_cn['profit_cny'].sum() + df_sg['profit_cny'].sum() + df_us['profit_cny'].sum()
+# (注意：现金和债券这里暂未计算汇率波动盈亏，仅计算股票部分)
+
+# --- 顶部核心指标 ---
+c1, c2, c3 = st.columns(3)
+c1.metric("💰 总净值 (CNY)", f"¥{net_worth:,.0f}")
+c2.metric("📅 今日波动", f"¥{total_day_gain:+,.0f}", delta_color="normal")
+c3.metric("🚀 股票总回报", f"¥{total_profit:+,.0f}", f"{(total_profit/(total_stock_cny-total_profit)*100):.1f}%")
+
 st.markdown("---")
 
-# 编辑模式开关
-edit_mode = st.checkbox("✏️ 开启编辑模式 (修改持仓、成本、预期股息)")
+# --- 分页展示 ---
+tab1, tab2, tab3, tab4 = st.tabs(["📈 统计与分析", "🇨🇳 A股/港股", "🇸🇬 SG Reits", "🇺🇸 美股/ETF"])
 
-# 处理数据
-df_display = st.session_state.portfolio.copy()
+# Tab 1: 统计分析 (你的“增长趋势”需求)
+with tab1:
+    st.subheader("资金分布与增长")
+    
+    # 1. 资产配置饼图
+    assets = {
+        'A股/港股': df_cn['mkt_val_cny'].sum(),
+        '新加坡REITs': df_sg['mkt_val_cny'].sum(),
+        '美股/ETF': df_us['mkt_val_cny'].sum(),
+        '美债': total_bond_cny,
+        '现金': total_cash_cny
+    }
+    fig_pie = px.pie(values=list(assets.values()), names=list(assets.keys()), title="资产配置比例 (CNY)")
+    st.plotly_chart(fig_pie, use_container_width=True)
 
-if edit_mode:
-    st.info("💡 在表格中直接双击单元格进行修改，修改后按 Enter 键。")
-    # 使用 DataEditor 允许用户直接修改数据
-    edited_df = st.data_editor(
-        df_display,
-        column_config={
-            "code": "代码",
-            "name": "名称",
-            "cost": st.column_config.NumberColumn("持仓成本", format="¥%.2f"),
-            "qty": st.column_config.NumberColumn("持仓数量", min_value=0),
-            "expected_div": st.column_config.NumberColumn("预期股息(每股)", format="¥%.2f"),
-            "buy_yield": st.column_config.NumberColumn("买入阈值(%)", help="当股息率高于此值提醒买入"),
-            "sell_yield": st.column_config.NumberColumn("卖出阈值(%)", help="当股息率低于此值提醒卖出"),
-        },
-        hide_index=True,
-        num_rows="dynamic"
+    # 2. 成本 vs 现值 (展示增长)
+    # 汇总各市场的成本和现值
+    cost_vs_val = pd.DataFrame({
+        'Market': ['CN/HK', 'SG', 'US'],
+        'Cost': [
+            (df_cn['cost']*df_cn['qty']).sum(),
+            (df_sg['cost']*df_sg['qty']*sgd_rate).sum(),
+            (df_us['cost']*df_us['qty']*usd_rate).sum()
+        ],
+        'Value': [
+            df_cn['mkt_val_cny'].sum(),
+            df_sg['mkt_val_cny'].sum(),
+            df_us['mkt_val_cny'].sum()
+        ]
+    })
+    
+    fig_bar = go.Figure(data=[
+        go.Bar(name='投入成本', x=cost_vs_val['Market'], y=cost_vs_val['Cost']),
+        go.Bar(name='当前市值', x=cost_vs_val['Market'], y=cost_vs_val['Value'])
+    ])
+    fig_bar.update_layout(barmode='group', title="各市场 投入成本 vs 当前市值 (CNY)")
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+
+# Tab 2: A股/港股 (高股息)
+with tab2:
+    st.caption("策略：高股息 | 关注：买卖阈值提醒")
+    # 编辑器
+    edited_cn = st.data_editor(
+        df_cn[['code', 'name', 'qty', 'cost', 'exp_div', 'buy_yld', 'sell_yld']],
+        column_config={"code":"代码", "qty":"股数", "exp_div":"预期股息", "buy_yld":"买入%", "sell_yld":"卖出%"},
+        num_rows="dynamic",
+        key="editor_cn"
     )
-    # 更新 Session State
-    if not edited_df.equals(st.session_state.portfolio):
-        st.session_state.portfolio = edited_df
-        st.rerun()
-else:
-    # 获取实时价格并计算
-    with st.spinner('正在从交易所同步最新股价...'):
-        final_df = get_market_data(df_display)
-
-    # --- 概览指标 ---
-    total_market_value = final_df['market_value'].sum()
-    total_profit = final_df['profit'].sum()
-    # 估算年股息收入
-    est_annual_dividend = (final_df['qty'] * final_df['expected_div']).sum()
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("总持仓市值", f"¥{total_market_value:,.0f}")
-    col2.metric("总浮动盈亏", f"¥{total_profit:,.0f}", delta_color="normal")
-    col3.metric("预期年分红", f"¥{est_annual_dividend:,.0f}", help="基于持仓数量 * 预期每股分红")
-
-    st.markdown("---")
-    
-    # --- 重点提醒区域 ---
-    st.subheader("🔔 操作提醒")
-    alerts = final_df[final_df['action'].str.contains("买入|卖出")]
-    if not alerts.empty:
-        for index, row in alerts.iterrows():
-            color = "green" if "买入" in row['action'] else "red"
-            msg = f"**{row['name']}**: 当前股息率 **{row['yield_now']:.2f}%** ({row['action']}) - 现价: ¥{row['current_price']:.2f}"
-            if color == "green":
-                st.success(msg)
-            else:
-                st.error(msg)
-    else:
-        st.info("当前没有触发阈值的操作建议，安心持有。")
-
-    # --- 详细表格 ---
-    st.subheader("📋 持仓详情")
-    
-    # 格式化显示
-    display_cols = ['name', 'current_price', 'yield_now', 'action', 'qty', 'cost', 'profit', 'weight', 'buy_yield', 'sell_yield']
-    
-    # 样式美化：高亮操作建议
-    def highlight_action(val):
-        if '买入' in str(val):
-            return 'background-color: #d4edda; color: #155724; font-weight: bold'
-        elif '卖出' in str(val):
-            return 'background-color: #f8d7da; color: #721c24; font-weight: bold'
-        return ''
-
+    # 展示结果
+    show_cols = ['name', 'price', 'change_pct', 'yield_now', 'action', 'mkt_val_local', 'profit_cny']
     st.dataframe(
-        final_df[display_cols].style.format({
-            'current_price': '¥{:.2f}',
-            'yield_now': '{:.2f}%',
-            'cost': '¥{:.2f}',
-            'profit': '¥{:,.0f}',
-            'weight': '{:.1f}%',
-            'buy_yield': '{:.1f}%',
-            'sell_yield': '{:.1f}%'
-        }).applymap(highlight_action, subset=['action']),
-        column_config={
-            "name": "名称",
-            "current_price": "现价",
-            "yield_now": "当前股息率",
-            "action": "操作建议",
-            "qty": "持股数",
-            "cost": "成本价",
-            "profit": "浮动盈亏",
-            "weight": "仓位占比",
-            "buy_yield": "目标买入率",
-            "sell_yield": "目标卖出率"
-        },
-        height=500,
-        use_container_width=True,
-        hide_index=True
+        df_cn[show_cols].style.format({
+            'price': '{:.2f}', 'change_pct': '{:+.2f}%', 'yield_now': '{:.2f}%', 
+            'mkt_val_local': '{:,.0f}', 'profit_cny': '{:+,.0f}'
+        }),
+        use_container_width=True, hide_index=True
+    )
+    if not edited_cn.equals(st.session_state.cn_stocks[['code', 'name', 'qty', 'cost', 'exp_div', 'buy_yld', 'sell_yld']]):
+        st.session_state.cn_stocks = pd.merge(edited_cn, st.session_state.cn_stocks[['code']], on='code', how='left').fillna(0)
+        st.rerun()
+
+# Tab 3: 新加坡 REITs
+with tab3:
+    st.caption("策略：收息 REITs | 货币：SGD")
+    edited_sg = st.data_editor(
+        df_sg[['code', 'name', 'qty', 'cost', 'exp_div', 'buy_yld', 'sell_yld']],
+        num_rows="dynamic",
+        key="editor_sg"
+    )
+    show_cols_sg = ['name', 'price', 'change_pct', 'yield_now', 'action', 'mkt_val_local', 'profit_cny']
+    st.dataframe(
+        df_sg[show_cols_sg].style.format({
+            'price': 'S${:.3f}', 'change_pct': '{:+.2f}%', 'yield_now': '{:.2f}%', 
+            'mkt_val_local': 'S${:,.0f}', 'profit_cny': '¥{:+,.0f}'
+        }),
+        use_container_width=True, hide_index=True
+    )
+
+# Tab 4: 美股/ETF
+with tab4:
+    st.caption("策略：成长/定投 | 重点：总回报率")
+    edited_us = st.data_editor(
+        df_us[['code', 'name', 'qty', 'cost']],
+        num_rows="dynamic",
+        key="editor_us"
+    )
+    # 美股不展示股息率，展示回报率
+    show_cols_us = ['name', 'price', 'change_pct', 'total_return_pct', 'mkt_val_local', 'profit_cny']
+    st.dataframe(
+        df_us[show_cols_us].style.format({
+            'price': '${:.2f}', 'change_pct': '{:+.2f}%', 'total_return_pct': '{:+.2f}%',
+            'mkt_val_local': '${:,.0f}', 'profit_cny': '¥{:+,.0f}'
+        }).applymap(lambda v: 'color: green' if v > 0 else 'color: red', subset=['total_return_pct']),
+        use_container_width=True, hide_index=True
     )
